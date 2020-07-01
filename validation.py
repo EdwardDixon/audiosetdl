@@ -1,7 +1,7 @@
 import json
 import os.path
 import sox
-import soundfile as sf
+import torchaudio
 
 from errors import FfmpegValidationError, FfmpegIncorrectDurationError, FfmpegUnopenableFileError
 from utils import run_command
@@ -59,23 +59,27 @@ def validate_audio(audio_filepath, audio_info, end_past_video_end=False):
         raise FfmpegValidationError(error_msg)
 
     # Check to see if we can open the file
+    audio_samples = None
+    rate = None
     try:
-        sf.read(audio_filepath)
+        audio_samples, rate = torchaudio.load(audio_filepath)
     except Exception as e:
         raise FfmpegUnopenableFileError(audio_filepath, e)
 
+
     sox_info = sox.file_info.info(audio_filepath)
+    info = torchaudio.info(audio_filepath)
 
     # If duration specifically doesn't match, catch that separately so we can
     # retry with a different duration
     target_duration = audio_info['duration']
-    actual_duration = sox_info['num_samples'] / audio_info['sample_rate']
+    actual_duration = sox_info['num_samples'] / sox_info['sample_rate']
     if target_duration != actual_duration:
-        if not(end_past_video_end and actual_duration < target_duration):
+        if not(end_past_video_end) and actual_duration < target_duration:
             raise FfmpegIncorrectDurationError(audio_filepath, target_duration,
                                                actual_duration)
     for k, v in audio_info.items():
-        if k == 'duration' and (end_past_video_end and actual_duration < target_duration):
+        if k == 'duration' and (end_past_video_end or actual_duration >= target_duration):
             continue
 
         output_v = sox_info[k]
@@ -137,7 +141,7 @@ def validate_video(video_filepath, ffprobe_path, video_info, end_past_video_end=
         raise FfmpegValidationError(error_msg.format(video_filepath))
     actual_duration = float(ffprobe_info['nb_frames']) / actual_framerate
     if target_duration != actual_duration:
-        if not(end_past_video_end and actual_duration < target_duration):
+        if not(end_past_video_end) and actual_duration < target_duration:
             raise FfmpegIncorrectDurationError(video_filepath, target_duration,
                                                actual_duration)
 

@@ -17,7 +17,7 @@ import urllib.request
 from functools import partial
 
 import multiprocessing_logging
-import pafy
+from pytube import YouTube
 
 from errors import SubprocessError, FfmpegValidationError, \
                    FfmpegIncorrectDurationError, FfmpegUnopenableFileError
@@ -122,7 +122,7 @@ def parse_arguments():
                         dest='audio_format',
                         action='store',
                         type=str,
-                        default='flac',
+                        default='mp3',
                         help='Name of audio format used by ffmpeg for output audio')
 
     parser.add_argument('-vf',
@@ -138,14 +138,15 @@ def parse_arguments():
                         dest='video_mode',
                         action='store',
                         type=str,
-                        default='bestvideoaudio',
+                        default='audioonly',
                         help="Name of the method in which video is downloaded. " \
                              "'bestvideo' obtains the best quality video that " \
                              "does not contain an audio stream. 'bestvideoaudio' " \
                              "obtains the best quality video that contains an " \
                              "audio stream. 'bestvideowithaudio' obtains the " \
                              "best quality video without an audio stream and " \
-                             " merges it with audio stream")
+                             " merges it with audio stream. 'audioonly' downloads" \
+                             "only the audio.")
 
     parser.add_argument('-vfr',
                         '--video-frame-rate',
@@ -401,9 +402,10 @@ def download_yt_video(ytid, ts_start, ts_end, output_dir, ffmpeg_path, ffprobe_p
 
     # Get the direct URLs to the videos with best audio and with best video (with audio)
 
-    video = pafy.new(video_page_url)
+    video = YouTube(video_page_url)
     video_duration = video.length
-    end_past_video_end = False
+
+    end_past_video_end = True
     if ts_end > video_duration:
         warn_msg = "End time for segment ({} - {}) of video {} extends past end of video (length {} sec)"
         LOGGER.warning(warn_msg.format(ts_start, ts_end, ytid, video_duration))
@@ -412,23 +414,16 @@ def download_yt_video(ytid, ts_start, ts_end, output_dir, ffmpeg_path, ffprobe_p
         end_past_video_end = True
 
     if video_mode in ('bestvideo', 'bestvideowithaudio'):
-        best_video = video.getbestvideo()
-        # If there isn't a video only option, go with best video with audio
-        if best_video is None:
-            best_video = video.getbest()
-    elif video_mode in ('bestvideoaudio', 'bestvideoaudionoaudio'):
-        best_video = video.getbest()
+        best_video = video.streams.get_highest_resolution()
+    elif video_mode == 'audioonly':
+        best_video = video.streams.get_audio_only()
     else:
-        raise ValueError('Invalid video mode: {}'.format(video_mode))
-    best_audio = video.getbestaudio()
-    best_video_url = best_video.url
-    best_audio_url = best_audio.url
+        best_video = video.streams.get_first()
+
 
     audio_info = {
         'sample_rate': audio_sample_rate,
         'channels': 2,
-        'bitrate': audio_bit_depth,
-        'encoding': audio_codec.upper(),
         'duration': duration
     }
     video_info = {
@@ -437,86 +432,37 @@ def download_yt_video(ytid, ts_start, ts_end, output_dir, ffmpeg_path, ffprobe_p
         'codec_name': video_codec.lower(),
         'duration': duration
     }
+
     # Download the audio
+    download_tmp_file = f"audio_{ytid}.mp4"
+    downloaded_file_path = best_video.download(filename=download_tmp_file)
+
     audio_input_args = ['-n', '-ss', str(ts_start)]
+
     audio_output_args = ['-t', str(duration),
                          '-ar', str(audio_sample_rate),
                          '-vn',
                          '-ac', str(audio_info['channels']),
-                         '-sample_fmt', 's{}'.format(audio_bit_depth),
-                         '-f', audio_format,
-                         '-acodec', audio_codec]
-    ffmpeg(ffmpeg_path, best_audio_url, audio_filepath,
+                         #'-sample_fmt', 's{}'.format(audio_bit_depth),
+                         '-f', audio_format]#,
+                         #'-acodec', audio_codec]
+
+    ffmpeg(ffmpeg_path, downloaded_file_path, audio_filepath,
            input_args=audio_input_args, output_args=audio_output_args,
            num_retries=num_retries, validation_callback=validate_audio,
            validation_args={'audio_info': audio_info,
                             'end_past_video_end': end_past_video_end})
 
-    if video_mode != 'bestvideowithaudio':
-        # Download the video
-        video_input_args = ['-n', '-ss', str(ts_start)]
-        video_output_args = ['-t', str(duration),
-                             '-f', video_format,
-                             '-r', str(video_frame_rate),
-                             '-vcodec', video_codec]
-        # Suppress audio stream if we don't want to audio in the video
-        if video_mode in ('bestvideo', 'bestvideoaudionoaudio'):
-            video_output_args.append('-an')
-
-        ffmpeg(ffmpeg_path, best_video_url, video_filepath,
-               input_args=video_input_args, output_args=video_output_args,
-               num_retries=num_retries, validation_callback=validate_video,
-               validation_args={'ffprobe_path': ffprobe_path,
-                                'video_info': video_info,
-                                'end_past_video_end': end_past_video_end})
+    # Remove the original file, probably bulkier, we really just want our cropped-down MP3
+    if os.path.exists(downloaded_file_path):
+        os.remove(downloaded_file_path)
     else:
-        # Download the best quality video, in lossless encoding
-        if video_codec != 'h264':
-            error_msg = 'Not currently supporting merging of best quality video with video for codec: {}'
-            raise NotImplementedError(error_msg.format(video_codec))
-        video_input_args = ['-n', '-ss', str(ts_start)]
-        video_output_args = ['-t', str(duration),
-                             '-f', video_format,
-                             '-crf', '0',
-                             '-preset', 'medium',
-                             '-r', str(video_frame_rate),
-                             '-an',
-                             '-vcodec', video_codec]
-
-        ffmpeg(ffmpeg_path, best_video_url, video_filepath,
-               input_args=video_input_args, output_args=video_output_args,
-               num_retries=num_retries)
-
-        # Merge the best lossless video with the lossless audio, and compress
-        merge_video_filepath = os.path.splitext(video_filepath)[0] \
-                               + '_merge.' + video_format
-        video_input_args = ['-n']
-        video_output_args = ['-f', video_format,
-                             '-r', str(video_frame_rate),
-                             '-vcodec', video_codec,
-                             '-acodec', 'aac',
-                             '-ar', str(audio_sample_rate),
-                             '-ac', str(audio_info['channels']),
-                             '-strict', 'experimental']
-
-        ffmpeg(ffmpeg_path, [video_filepath, audio_filepath], merge_video_filepath,
-               input_args=video_input_args, output_args=video_output_args,
-               num_retries=num_retries, validation_callback=validate_video,
-               validation_args={'ffprobe_path': ffprobe_path,
-                                'video_info': video_info,
-                                'end_past_video_end': end_past_video_end})
-
-        # Remove the original video file and replace with the merged version
-        if os.path.exists(merge_video_filepath):
-            os.remove(video_filepath)
-            shutil.move(merge_video_filepath, video_filepath)
-        else:
-            error_msg = 'Cannot find merged video for {} ({} - {}) at {}'
-            LOGGER.error(error_msg.format(ytid, ts_start, ts_end, merge_video_filepath))
+        error_msg = f'Cannot find original download file for {ytid} ({ts_start} - {ts_start}) at {downloaded_file_path}'
+        LOGGER.error(error_msg.format(ytid, ts_start, ts_end, downloaded_file_path))
 
     LOGGER.info('Downloaded video {} ({} - {})'.format(ytid, ts_start, ts_end))
 
-    return video_filepath, audio_filepath
+    return audio_filepath
 
 
 def segment_mp_worker(ytid, ts_start, ts_end, data_dir, ffmpeg_path,
