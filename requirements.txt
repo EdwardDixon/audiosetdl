@@ -4,3 +4,4 @@ multiprocessing-logging==0.2.4
 sox==1.3.3
 sk-video==1.1.8
 PySoundFile==0.9.0.post1
+pytube3==9.6.4
