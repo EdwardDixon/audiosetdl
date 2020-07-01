@@ -1,9 +1,11 @@
 audiosetdl
 ================
+
 Modules and scripts for downloading Google's
 [AudioSet](https://research.google.com/audioset/) dataset, a dataset of
 ~2.1 million annotated segments from YouTube videos.
 
+This is a **forked and slightly butchered** version of the original **audiosetdl**, which downloads _only_ the audio, skips some possibly quite valuable sanity checks _and_ lossily compresses the audio to MP3.  Absolutely no warranty express or implied, side-effects may include an uncomfortably full harddrive and hastening the heat death of the universe.  
 
 
 ## Setup
